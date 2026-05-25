@@ -21,41 +21,36 @@ class WebSocketHandler:
     def __init__(self):
         pass
 
-    async def _handle_mcp_server_message(self, agent_id: str, server_id: str, message: str):
+    async def _handle_mcp_server_message(self, agent_id: str, mcp_connection_uuid: str, message: str):
         """处理MCP服务器消息"""
         try:
             # 解析消息
-            logger.info(f"收到MCP服务器消息: {agent_id}/{server_id} - {message}")
+            logger.debug(f"收到MCP服务器消息: {agent_id} (UUID: {mcp_connection_uuid}) - {message}")
 
             # 尝试解析JSON-RPC响应消息
             try:
                 message_data = json.loads(message)
-                logger.info(f"---------MCP服务器消息---------: {message_data}")
+                logger.debug(f"---------MCP服务器消息---------: {message_data}")
                 
                 # 处理工具列表响应
                 if self._is_tools_list_response(message_data):
-                    logger.info(f"收到工具列表响应: {agent_id}/{server_id}")
-                    self._handle_tools_list_response(agent_id, server_id, message_data)
+                    logger.debug(f"收到工具列表响应: {agent_id} (UUID: {mcp_connection_uuid})")
+                    self._handle_tools_list_response(agent_id, mcp_connection_uuid, message_data)
                 
                 # 处理初始化响应
                 if self._is_initialize_response(message_data):
-                    logger.info(f"收到初始化响应: {agent_id}/{server_id}")
-                    self._handle_initialize_response(agent_id, server_id, message_data)
+                    logger.debug(f"收到初始化响应: {agent_id} (UUID: {mcp_connection_uuid})")
+                    self._handle_initialize_response(agent_id, mcp_connection_uuid, message_data)
 
                 # 检查是否为待处理的响应
                 transformed_id = message_data.get("id")
                 if transformed_id and transformed_id in connection_manager.pending_responses:
                     # 这是一个待处理的响应
-                    pending = connection_manager.add_server_response(transformed_id, server_id, message_data)
+                    pending = connection_manager.add_server_response(transformed_id, mcp_connection_uuid, message_data)
                     if pending:
                         # 所有期望的服务器都已响应，聚合响应
                         aggregated_response = connection_manager.aggregate_responses(pending)
-                        logger.info(f"---------聚合响应---------: {aggregated_response}")
-                        await connection_manager.forward_to_robot_by_uuid(
-                            pending.connection_uuid, aggregated_response
-                        )
-                        # 清理待处理的响应
-                        connection_manager.remove_pending_response(transformed_id)
+                        logger.debug(f"---------聚合响应---------: {aggregated_response}")
                         # 还原JSON-RPC ID并获取目标连接UUID
                         connection_uuid, restored_message = (
                             connection_manager.restore_jsonrpc_message(aggregated_response)
@@ -70,6 +65,8 @@ class WebSocketHandler:
                                 logger.error(f"转发消息给特定小智端连接失败: {connection_uuid}")
                         else:
                             logger.error(f"没有特定目标，无法转发消息")
+                        # 清理待处理的响应
+                        connection_manager.remove_pending_response(transformed_id)
             except json.JSONDecodeError:
                 # 如果不是JSON格式，按原来的方式处理
                 logger.error(f"由于消息不是JSON格式，已忽略: {message}")
@@ -97,25 +94,23 @@ class WebSocketHandler:
             and "protocolVersion" in message_data.get("result", {})
         )
 
-    def _handle_tools_list_response(self, agent_id: str, server_id: str, message_data: dict):
+    def _handle_tools_list_response(self, agent_id: str, mcp_connection_uuid: str, message_data: dict):
         """处理工具列表响应"""
         try:
             result = message_data.get("result", {})
             tools = result.get("tools", [])
             
             # 更新连接管理器中的工具列表
-            connection_manager.update_tool_list(agent_id, server_id, tools)
-            logger.info(f"已更新工具列表: {agent_id}/{server_id}, 工具数量: {len(tools)}")
+            connection_manager.update_tool_list(agent_id, mcp_connection_uuid, tools)
         except Exception as e:
             logger.error(f"处理工具列表响应时发生错误: {e}")
 
-    def _handle_initialize_response(self, agent_id: str, server_id: str, message_data: dict):
+    def _handle_initialize_response(self, agent_id: str, mcp_connection_uuid: str, message_data: dict):
         """处理初始化响应"""
         try:
             result = message_data.get("result", {})
             # 更新服务器信息
-            connection_manager.update_server_info(agent_id, server_id, result)
-            logger.info(f"已更新服务器信息: {agent_id}/{server_id}")
+            connection_manager.update_server_info(agent_id, mcp_connection_uuid, result)
         except Exception as e:
             logger.error(f"处理初始化响应时发生错误: {e}")
 
@@ -125,7 +120,7 @@ class WebSocketHandler:
         """处理小智端消息"""
         try:
             # 解析消息
-            logger.info(
+            logger.debug(
                 f"收到小智端消息: {agent_id} (UUID: {connection_uuid}) - {message}"
             )
 
@@ -156,7 +151,7 @@ class WebSocketHandler:
                     transformed_message_data, ensure_ascii=False
                 )
 
-                logger.info(
+                logger.debug(
                     f"转换后的消息ID: {message_data.get('id')} -> {transformed_message_data.get('id')}"
                 )
 
@@ -165,7 +160,7 @@ class WebSocketHandler:
                 # 如果消息不是JSON格式，仍然检查MCP服务器连接状态
 
             # 检查是否有对应的MCP服务器连接
-            if not connection_manager.get_agent_servers(agent_id):
+            if not connection_manager.get_agent_mcp_connections(agent_id):
                 logger.warning(f"智能体没有连接的MCP服务器: {agent_id}")
                 # 发送JSON-RPC格式的错误消息给小智端
                 error_message = create_tool_not_connected_error(request_id, agent_id)
@@ -175,11 +170,11 @@ class WebSocketHandler:
                 return
 
             # 获取所有可用的服务器
-            servers = connection_manager.get_agent_servers(agent_id)
-            connected_servers = [server_id for server_id in servers 
-                               if connection_manager.is_mcp_server_connected(agent_id, server_id)]
-            
-            if not connected_servers:
+            mcp_connections = connection_manager.get_agent_mcp_connections(agent_id)
+            connected_connections = [mcp_connection_uuid for mcp_connection_uuid in mcp_connections
+                               if connection_manager.is_mcp_server_connected(agent_id, mcp_connection_uuid)]
+
+            if not connected_connections:
                 logger.error(f"没有可用的MCP服务器: {agent_id}")
                 error_message = create_forward_failed_error(request_id, agent_id)
                 await connection_manager.forward_to_robot_by_uuid(
@@ -191,16 +186,16 @@ class WebSocketHandler:
             transformed_request_id = transformed_message_data.get("id")
             if transformed_request_id:
                 connection_manager.register_pending_response(
-                    transformed_request_id, request_id, connection_uuid, connected_servers
+                    transformed_request_id, request_id, connection_uuid, connected_connections
                 )
 
             # 转发消息给所有连接的MCP服务器
             success_count = 0
-            for server_id in connected_servers:
-                logger.info(f"转发消息给MCP服务器: {agent_id}/{server_id}")
-                if connection_manager.is_mcp_server_connected(agent_id, server_id):
+            for mcp_connection_uuid in connected_connections:
+                logger.debug(f"转发消息给MCP服务器: {agent_id} (UUID: {mcp_connection_uuid})")
+                if connection_manager.is_mcp_server_connected(agent_id, mcp_connection_uuid):
                     success = await connection_manager.forward_to_mcp_server(
-                        agent_id, server_id, transformed_message
+                        agent_id, mcp_connection_uuid, transformed_message
                     )
                     if success:
                         success_count += 1
@@ -251,7 +246,7 @@ class WebSocketHandler:
                 connection_uuid, response_dict
             )
             
-            logger.info(f"已返回工具列表，工具数量: {len(all_tools)}")
+            logger.debug(f"已返回工具列表，工具数量: {len(all_tools)}")
             
         except Exception as e:
             logger.error(f"处理工具列表请求时发生错误: {e}")
@@ -284,9 +279,9 @@ class WebSocketHandler:
                 return
             
             # 查找工具对应的服务器
-            server_id = connection_manager.find_tool_server(agent_id, tool_name)
-            
-            if not server_id:
+            mcp_connection_uuid = connection_manager.find_tool_connection(agent_id, tool_name)
+
+            if not mcp_connection_uuid:
                 # 发送错误响应
                 error_response = JSONRPCProtocol.create_error_response(
                     error_code=JSONRPCProtocol.METHOD_NOT_FOUND,
@@ -299,11 +294,11 @@ class WebSocketHandler:
                 return
             
             # 检查服务器是否连接
-            if not connection_manager.is_mcp_server_connected(agent_id, server_id):
+            if not connection_manager.is_mcp_server_connected(agent_id, mcp_connection_uuid):
                 # 发送错误响应
                 error_response = JSONRPCProtocol.create_error_response(
                     error_code=JSONRPCProtocol.TOOL_NOT_CONNECTED,
-                    error_message=f"MCP服务器 '{server_id}' 未连接",
+                    error_message="工具对应的MCP连接未连接",
                     request_id=request_id
                 )
                 await connection_manager.forward_to_robot_by_uuid(
@@ -323,12 +318,12 @@ class WebSocketHandler:
             transformed_request_id = transformed_message_data.get("id")
             if transformed_request_id:
                 connection_manager.register_pending_response(
-                    transformed_request_id, request_id, connection_uuid, [server_id]
+                    transformed_request_id, request_id, connection_uuid, [mcp_connection_uuid]
                 )
             
             # 转发给MCP服务器
             success = await connection_manager.forward_to_mcp_server(
-                agent_id, server_id, transformed_message
+                agent_id, mcp_connection_uuid, transformed_message
             )
             
             if not success:
@@ -345,7 +340,7 @@ class WebSocketHandler:
                 if transformed_request_id:
                     connection_manager.remove_pending_response(transformed_request_id)
             
-            logger.info(f"已转发工具调用请求: {tool_name} -> {agent_id}/{server_id}")
+            logger.info(f"已转发工具调用请求: {tool_name} -> {agent_id} (UUID: {mcp_connection_uuid})")
             
         except Exception as e:
             logger.error(f"处理工具调用请求时发生错误: {e}")
