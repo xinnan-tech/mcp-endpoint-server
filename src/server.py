@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时
     logger.info("MCP Endpoint Server 正在启动...")
-    logger.info(f"=====下面的地址分别是智控台/单模块MCP接入点地址====")
+    logger.info(f"=====下面的地址分别是智控台/多模块MCP接入点地址====")
     local_ip = get_local_ip()
     logger.info(
         f"智控台MCP参数配置: http://{local_ip}:{config.getint('server', 'port', 8004)}/mcp_endpoint/health?key={config.get('server', 'key', '')}"
@@ -78,6 +78,9 @@ async def lifespan(app: FastAPI):
     token = quote(encrypted_token)
     logger.info(
         f"单模块部署MCP接入点: ws://{local_ip}:{config.getint('server', 'port', 8004)}/mcp_endpoint/mcp/?token={token}"
+    )
+    logger.info(
+        f"多模块部署MCP接入点: ws://{local_ip}:{config.getint('server', 'port', 8004)}/mcp_endpoint/mcp/?token={token}"
     )
     logger.info(
         "=====请根据具体部署选择使用，请勿泄露给任何人======",
@@ -126,7 +129,7 @@ async def root():
 
 
 @app.get("/mcp_endpoint/health")
-async def health_check(key: str = None):
+async def health_check(key: str = None, agentid: str = None):
     """健康检查"""
     # 验证key参数
     expected_key = config.get("server", "key", "")
@@ -138,16 +141,21 @@ async def health_check(key: str = None):
         )
         return JSONRPCProtocol.to_dict(response)
 
-    stats = connection_manager.get_connection_stats()
+    if agentid:
+        response = JSONRPCProtocol.create_success_response(
+            result=connection_manager.get_agent_tools_summary(agentid)
+        )
+        return JSONRPCProtocol.to_dict(response)
+
     response = JSONRPCProtocol.create_success_response(
-        result={"status": "success", "connections": stats}
+        result={"status": "success", "message": "ok"}
     )
     return JSONRPCProtocol.to_dict(response)
 
 
 @app.websocket("/mcp_endpoint/mcp/")
 async def websocket_tool_endpoint(websocket: WebSocket):
-    """工具端WebSocket端点"""
+    """MCP服务器端WebSocket端点"""
     await websocket.accept()
 
     # 获取agentId参数
@@ -155,27 +163,29 @@ async def websocket_tool_endpoint(websocket: WebSocket):
     if not agent_id:
         return
 
+    mcp_connection_uuid = None
     try:
         # 注册连接
-        await connection_manager.register_tool_connection(agent_id, websocket)
-        logger.info(f"工具端连接已建立: {agent_id}")
+        mcp_connection_uuid = await connection_manager.register_mcp_server_connection(agent_id, websocket)
+        logger.info(f"MCP服务器连接已建立: {agent_id} (UUID: {mcp_connection_uuid})")
 
         # 处理消息
         while True:
             try:
                 message = await websocket.receive_text()
-                await websocket_handler._handle_tool_message(agent_id, message)
+                await websocket_handler._handle_mcp_server_message(agent_id, mcp_connection_uuid, message)
             except WebSocketDisconnect:
                 break
             except Exception as e:
-                logger.error(f"处理工具端消息时发生错误: {e}")
+                logger.error(f"处理MCP服务器消息时发生错误: {e}")
                 break
 
     except Exception as e:
-        logger.error(f"处理工具端连接时发生错误: {e}")
+        logger.error(f"处理MCP服务器连接时发生错误: {e}")
     finally:
-        await connection_manager.unregister_tool_connection(agent_id)
-        logger.info(f"工具端连接已关闭: {agent_id}")
+        if mcp_connection_uuid:
+            await connection_manager.unregister_mcp_server_connection(agent_id, mcp_connection_uuid)
+            logger.info(f"MCP服务器连接已关闭: {agent_id} (UUID: {mcp_connection_uuid})")
 
 
 @app.websocket("/mcp_endpoint/call/")
